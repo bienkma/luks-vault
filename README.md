@@ -3,19 +3,20 @@
 ## Getting started
 
 Luks-vault is a simple project to integrate LUKS with Vault hashicorp. It will handle rotation passPhrase key of LUKS
-and write to secret vault.
+and write to secret vault. We are going to use key slot 0 and 1 to swap a new key and an old key.
 
 ## Prepare
 
 - vault server
 - Agent install to node which are using LUKS to encrypt device
 - Support Unix OS only
+- A server with luks device had a slot key 0 or 1
 
 ## How to build
 
 ```shell
  docker run --rm \
-            -v /Users/bienkma/go/src/github.com/bienkma/luks-vault:/go/src/github.com/bienkma/luks-vault \
+            -v `pwd`:/go/src/github.com/bienkma/luks-vault \
             -w /go/src/github.com/bienkma/luks-vault \
             golang:1.18 sh -c \
             'GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -mod=mod -a -installsuffix cgo -o luks-vault main.go'
@@ -86,12 +87,12 @@ systemctl status luks-vault
 ```json
 {
   "created": "2023-06-06T11:46:37.079847+07:00",
-  "key": "passPharse_change_me_now",
-  "slot": "0",
+  "key": "current_passphrase_on_luks",
+  "slot": "1",
   "ttl": "30m"
 }
 ```
-- Note: ttl valid time units are “ns”, “us” (or “µs”), “ms”, “s”, “m”, “h”.
+- Note: ttl valid time units are “ns”, “us” (or “µs”), “ms”, “s”, “m”, “h”. slot value have to map with currently luks which you changed by your hand via the command `/usr/sbin/cryptsetup -v -q luksAddKey /dev/data/data01 -d /path/to/init-key -S 1`
 
 ## Test and Deploy
 
@@ -104,4 +105,4 @@ systemctl stop luks-vault
 
 ## License
 
-For open source projects, say how it is licensed.
+Open source projects.
