@@ -93,6 +93,22 @@ systemctl status luks-vault
 ```
 - Note: ttl valid time units are “ns”, “us” (or “µs”), “ms”, “s”, “m”, “h”. slot value have to map with currently luks which you changed by your hand via the command `/usr/sbin/cryptsetup -v -q luksAddKey /dev/data/data01 -d /path/to/init-key -S 1`
 
+## write key to folder to change new key
+
+```shell
+mkdir -p /etc/data-at-rest
+echo "current_passphrase_on_luks" > /etc/data-at-rest/key
+chmod 600 /etc/data-at-rest/key
+```
+
+## fstab can mount device when server reboot
+
+```shell
+vi /etc/crypttab
+# <target name>	<source device>		<key file>	<options>
+data01 /dev/mapper/data-data01 /etc/data-at-rest/key luks
+```
+
 ## Test and Deploy
 
 ```shell
@@ -104,4 +120,4 @@ systemctl stop luks-vault
 
 ## License
 
-Open source projects.
+Apache-2.0 license
