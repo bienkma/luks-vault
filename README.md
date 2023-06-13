@@ -15,8 +15,8 @@ and write to secret vault.
 
 ```shell
  docker run --rm \
-            -v /Users/bienkma/go/src/git.ghtk.vn/devops/luks-vault:/go/src/git.ghtk.vn/devops/luks-vault \
-            -w /go/src/git.ghtk.vn/devops/luks-vault \
+            -v /Users/bienkma/go/src/github.com/bienkma/luks-vault:/go/src/github.com/bienkma/luks-vault \
+            -w /go/src/github.com/bienkma/luks-vault \
             golang:1.18 sh -c \
             'GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -mod=mod -a -installsuffix cgo -o luks-vault main.go'
 ```
