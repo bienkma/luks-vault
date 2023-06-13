@@ -1,7 +1,7 @@
 # luks-vault
 
 ## Getting started
-Luks-vault is a simple project to integrate LUKS with Vault hashicorp. It will handle rotation passPhrase key of LUKS and write to the secret vault. We are going to use key slots 0 and 1 to swap a new key and an old key. It can provide a solution to data at rest encryption with low cost by using LUKS and Vault open source.
+Luks-vault is a simple project to integrate [LUKS](https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/9/html/security_hardening/encrypting-block-devices-using-luks_security-hardening) with [Vault hashicorp](https://www.vaultproject.io/). It will handle rotation passPhrase key of LUKS and write to the secret vault. We are going to use key slots 0 and 1 to swap a new key and an old key. It can provide a solution to data at rest encryption with low cost by using LUKS and Vault open source.
 
 
 ## Prepare
