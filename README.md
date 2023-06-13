@@ -1,16 +1,15 @@
 # luks-vault
 
 ## Getting started
+Luks-vault is a simple project to integrate LUKS with Vault hashicorp. It will handle rotation passPhrase key of LUKS and write to the secret vault. We are going to use key slots 0 and 1 to swap a new key and an old key. It can provide a solution to data at rest encryption with low cost by using LUKS and Vault open source.
 
-Luks-vault is a simple project to integrate LUKS with Vault hashicorp. It will handle rotation passPhrase key of LUKS
-and write to secret vault. We are going to use key slot 0 and 1 to swap a new key and an old key.
 
 ## Prepare
 
-- vault server
+- A Vault server
 - Agent install to node which are using LUKS to encrypt device
 - Support Unix OS only
-- A server with luks device had a slot key 0 or 1
+- A server with LUKS device had a slot key 0 or 1 (see config a LUKS device [here](https://bienkma.github.io/database/data-at-rest.html))
 
 ## How to build
 
