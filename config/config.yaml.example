@@ -1,0 +1,9 @@
+vault_address: "http://10.110.32.85:8200"
+vault_token: "change_me"
+vault_mount_path: "luks/10.110.96.70"
+vault_secret_path: "dev/sda"
+vault_module_luks: true
+device_path: ="/dev/sda"
+folder_pass_phrase_path: "/etc/data-at-rest"
+pid_file_name: "/tmp/luks-vault.pid"
+log_file_name: "/tmp/log.log"
