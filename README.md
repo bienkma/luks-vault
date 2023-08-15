@@ -9,7 +9,7 @@ Luks-vault is a simple project to integrate [LUKS](https://access.redhat.com/doc
 - A Vault server
 - Agent install to node which are using LUKS to encrypt device
 - Support Unix OS only
-- A server with LUKS device had a slot key 0 or 1 (see config a LUKS device [here](https://bienkma.github.io/database/data-at-rest.html))
+- A server with LUKS device had a slot key 0 or 1 (see config a LUKS device [here](https://bienkma.github.io/mysharing/database/data-at-rest.html))
 
 ## How to build
 
