@@ -8,11 +8,13 @@ ensure_user() {
 }
 
 ensure_dirs() {
-	mkdir -p /etc/data-at-rest /var/log/luks-vault
+	mkdir -p /etc/data-at-rest /var/log/luks-vault /var/lib/luks-vault
 	chown root:luks-vault /etc/data-at-rest
 	chmod 750 /etc/data-at-rest
 	chown luks-vault:luks-vault /var/log/luks-vault
 	chmod 750 /var/log/luks-vault
+	chown luks-vault:luks-vault /var/lib/luks-vault
+	chmod 750 /var/lib/luks-vault
 
 	if [ ! -f /etc/data-at-rest/key ]; then
 		install -o root -g luks-vault -m 640 /dev/null /etc/data-at-rest/key

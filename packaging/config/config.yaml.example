@@ -1,10 +1,25 @@
-vault_address: "http://127.0.0.1:8200"
-vault_token: "change_me"
-vault_mount_path: "luks/hostname"
-vault_secret_path: "dev/sda"
-vault_module_luks: true
-cryptsetup_use_sudo: true
-device_path: "/dev/sda"
-folder_pass_phrase_path: "/etc/data-at-rest"
-pid_file_name: "/run/luks-vault/luks-vault.pid"
-log_file_name: "/var/log/luks-vault/agent.log"
+agent:
+  poll_interval: 10s
+  pid_file: /run/luks-vault/luks-vault.pid
+  log_file: /var/log/luks-vault/agent.log
+  state_file: /var/lib/luks-vault/rotation.state
+
+vault:
+  address: https://vault.example.com:8200
+  auth_method: approle
+  approle:
+    role_id: change-me-role-id
+    secret_id_file: /etc/luks-vault/approle-secret-id
+  kv2_mount: luks/hostname
+  secret_path: dev/sda
+  tls:
+    ca_cert: /etc/luks-vault/vault-ca.pem
+    client_cert: /etc/luks-vault/vault-client.pem
+    client_key: /etc/luks-vault/vault-client-key.pem
+    skip_verify: false
+
+luks:
+  enabled: true
+  device: /dev/sda
+  passphrase_dir: /etc/data-at-rest
+  cryptsetup_use_sudo: true

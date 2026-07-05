@@ -1,6 +1,7 @@
 package module
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -44,6 +45,21 @@ func TestParseVaultDataMissingField(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for missing created field")
+	}
+}
+
+func TestParseVaultDataNumericSlot(t *testing.T) {
+	data, err := parseVaultData(map[string]interface{}{
+		"key":     "secret-key",
+		"ttl":     "30m",
+		"slot":    json.Number("1"),
+		"created": "2026-07-05T12:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if data.Slot != "1" {
+		t.Fatalf("got slot %q, want 1", data.Slot)
 	}
 }
 

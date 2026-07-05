@@ -12,12 +12,8 @@ import (
 
 	"github.com/bienkma/luks-vault/config"
 	"github.com/bienkma/luks-vault/module"
-	vault "github.com/hashicorp/vault/api"
-	"github.com/sethvargo/go-password/password"
 	"github.com/sevlyar/go-daemon"
 )
-
-const pollInterval = 10 * time.Second
 
 var (
 	signal = flag.String("s", "", `Send signal to the daemon:
@@ -25,15 +21,17 @@ var (
 	stop - fast shutdown
 	reload - reloading the configuration file`)
 	foreground = flag.Bool("foreground", false, "Run in the foreground without daemon fork (for systemd)")
-	stop           = make(chan struct{})
-	done           = make(chan struct{})
+	stop         = make(chan struct{})
+	done         = make(chan struct{})
+	reloadAgent  *Instances
 	currentKeyName = "key"
 	newKeyName     = "newKey"
 )
 
 type Instances struct {
-	Vault module.VaultAgent
-	Luks  module.LUKSOperation
+	Vault   module.VaultAgent
+	Luks    module.LUKSOperation
+	runtime *runtime
 }
 
 func New() *Instances {
@@ -44,10 +42,12 @@ func (a *Instances) Start(ctx context.Context) {
 	cfg := config.New()
 
 	flag.Parse()
-	a.Luks.UseSudo = cfg.CryptsetupUseSudo
+	a.runtime = newRuntime(cfg)
+	a.syncLUKSConfig(cfg)
+	reloadAgent = a
 
 	if *foreground {
-		a.runForeground(ctx, cfg)
+		a.runForeground(ctx)
 		return
 	}
 
@@ -55,9 +55,9 @@ func (a *Instances) Start(ctx context.Context) {
 	daemon.AddCommand(daemon.StringFlag(signal, "reload"), syscall.SIGHUP, reloadHandler)
 
 	cntxt := &daemon.Context{
-		PidFileName: cfg.PidFileName,
+		PidFileName: cfg.Agent.PIDFile,
 		PidFilePerm: 0600,
-		LogFileName: cfg.LogFileName,
+		LogFileName: cfg.Agent.LogFile,
 		LogFilePerm: 0640,
 		Umask:       027,
 	}
@@ -81,7 +81,11 @@ func (a *Instances) Start(ctx context.Context) {
 	log.Println("- - - - - - - - - - - - - - -")
 	log.Println("luks-vault daemon started")
 
-	go a.worker(ctx, cfg)
+	go func() {
+		if err := a.runWorker(ctx); err != nil {
+			log.Printf("worker stopped with error: %v", err)
+		}
+	}()
 
 	err = daemon.ServeSignals()
 	if err != nil {
@@ -91,48 +95,88 @@ func (a *Instances) Start(ctx context.Context) {
 	log.Println("luks-vault daemon terminated")
 }
 
-func (a *Instances) runForeground(ctx context.Context, cfg *config.Configuration) {
+func (a *Instances) runForeground(ctx context.Context) {
+	cfg := a.runtime.Config()
+	if err := setupLogging(cfg.Agent.LogFile); err != nil {
+		fmt.Fprintf(os.Stderr, "unable to open log file %s: %v\n", cfg.Agent.LogFile, err)
+		os.Exit(1)
+	}
+
 	log.Println("luks-vault started in foreground mode")
-	if cfg.CryptsetupUseSudo {
+	if cfg.LUKS.CryptsetupUseSudo {
 		log.Println("cryptsetup will run via sudo")
 	}
 
 	sigCh := make(chan os.Signal, 1)
-	ossignal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT)
+	ossignal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGHUP)
 
-	go a.worker(ctx, cfg)
+	workerErr := make(chan error, 1)
+	go func() {
+		workerErr <- a.runWorker(ctx)
+	}()
 
-	sig := <-sigCh
-	log.Printf("received signal %v, shutting down", sig)
-	stop <- struct{}{}
-	<-done
-	log.Println("luks-vault terminated")
+	for {
+		select {
+		case sig := <-sigCh:
+			if sig == syscall.SIGHUP {
+				if err := a.runtime.Reload(); err != nil {
+					log.Printf("configuration reload failed: %v", err)
+				} else {
+					a.syncLUKSConfig(a.runtime.Config())
+				}
+				continue
+			}
+
+			log.Printf("received signal %v, shutting down", sig)
+			stop <- struct{}{}
+			<-done
+			log.Println("luks-vault terminated")
+			return
+		case err := <-workerErr:
+			if err != nil {
+				log.Printf("worker stopped with error: %v", err)
+				os.Exit(1)
+			}
+			log.Println("luks-vault worker exited")
+			return
+		}
+	}
 }
 
-func (a *Instances) worker(ctx context.Context, cfg *config.Configuration) {
+func (a *Instances) runWorker(ctx context.Context) error {
 	defer func() {
 		done <- struct{}{}
 	}()
 
-	vaultConfig := vault.DefaultConfig()
-	vaultConfig.Address = cfg.VaultAddress
-
-	client, err := vault.NewClient(vaultConfig)
-	if err != nil {
-		log.Printf("unable to initialize Vault client: %v", err)
-		return
+	if err := a.initVault(); err != nil {
+		return err
 	}
-	a.Vault.VaultClient = client
-	a.Vault.VaultClient.SetToken(cfg.VaultToken)
+
+	rotationBackoff := time.Duration(0)
 
 	for {
-		if stopped := a.waitOrStop(ctx, pollInterval); stopped {
-			return
+		cfg := a.runtime.Config()
+		wait := cfg.Agent.PollInterval
+		if rotationBackoff > 0 {
+			wait = rotationBackoff
 		}
 
-		vaultData, err := a.Vault.GetSecret(ctx, cfg.VaultMountPath, cfg.VaultSecretPath)
+		if stopped := a.waitOrStop(ctx, wait); stopped {
+			return nil
+		}
+
+		select {
+		case <-a.runtime.reload:
+			if err := a.initVault(); err != nil {
+				log.Printf("vault re-initialization failed after reload: %v", err)
+			}
+			a.syncLUKSConfig(a.runtime.Config())
+		default:
+		}
+
+		vaultData, err := a.Vault.GetSecret(ctx, cfg.Vault.KV2Mount, cfg.Vault.SecretPath)
 		if err != nil {
-			log.Printf("unable to get vault secret %s/%s: %v", cfg.VaultMountPath, cfg.VaultSecretPath, err)
+			log.Printf("unable to get vault secret %s/%s: %v", cfg.Vault.KV2Mount, cfg.Vault.SecretPath, err)
 			continue
 		}
 
@@ -142,13 +186,36 @@ func (a *Instances) worker(ctx context.Context, cfg *config.Configuration) {
 			continue
 		}
 		if !expired {
+			rotationBackoff = 0
+			continue
+		}
+
+		if !cfg.LUKS.Enabled {
+			log.Printf("vault secret TTL expired but luks.enabled is false, skipping rotation")
 			continue
 		}
 
 		if err := a.rotatePassphrase(ctx, cfg, vaultData); err != nil {
 			log.Printf("passphrase rotation failed: %v", err)
+			rotationBackoff = nextRotationBackoff(rotationBackoff)
+			log.Printf("next rotation retry in %s", rotationBackoff)
+			continue
 		}
+
+		rotationBackoff = 0
 	}
+}
+
+func (a *Instances) initVault() error {
+	cfg := a.runtime.Config()
+	if err := a.Vault.Configure(cfg.Vault); err != nil {
+		return fmt.Errorf("configure vault client: %w", err)
+	}
+	return nil
+}
+
+func (a *Instances) syncLUKSConfig(cfg *config.Configuration) {
+	a.Luks.UseSudo = cfg.LUKS.CryptsetupUseSudo
 }
 
 func (a *Instances) waitOrStop(ctx context.Context, d time.Duration) bool {
@@ -165,73 +232,6 @@ func (a *Instances) waitOrStop(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-func (a *Instances) rotatePassphrase(ctx context.Context, cfg *config.Configuration, vaultData *module.VaultData) error {
-	newKeyPath := fmt.Sprintf("%s/%s", cfg.FolderPassPhrasePath, newKeyName)
-	currentKeyPath := fmt.Sprintf("%s/%s", cfg.FolderPassPhrasePath, currentKeyName)
-	cleanupNewKey := true
-	defer func() {
-		if cleanupNewKey {
-			if err := os.Remove(newKeyPath); err != nil && !os.IsNotExist(err) {
-				log.Printf("warning: failed to remove temporary key file %s: %v", newKeyPath, err)
-			}
-		}
-	}()
-
-	newSlot, err := alternateSlot(vaultData.Slot)
-	if err != nil {
-		return err
-	}
-
-	pwd, err := password.Generate(64, 10, 10, false, false)
-	if err != nil {
-		return fmt.Errorf("generate new passphrase: %w", err)
-	}
-
-	newKeyData := module.VaultData{
-		Key:  pwd,
-		Slot: newSlot,
-		TTL:  vaultData.TTL,
-	}
-
-	if err := a.writeKeyFile(newKeyPath, newKeyData); err != nil {
-		return fmt.Errorf("write temporary key file: %w", err)
-	}
-
-	log.Printf("begin add new passphrase in %s device at keyslot %s", cfg.DevicePath, newKeyData.Slot)
-	if _, err := a.Luks.AddPasswdLUKS(cfg.DevicePath, currentKeyPath, newKeyPath, newKeyData.Slot); err != nil {
-		return fmt.Errorf("add LUKS key on slot %s: %w", newKeyData.Slot, err)
-	}
-	log.Printf("new passphrase added in %s device at keyslot %s", cfg.DevicePath, newKeyData.Slot)
-
-	if _, err := a.Luks.VerifyPasswdLUKS(cfg.DevicePath, newKeyPath); err != nil {
-		return fmt.Errorf("verify new passphrase with %s: %w", newKeyPath, err)
-	}
-	log.Printf("verified new passphrase on keyslot %s in %s device", newKeyData.Slot, cfg.DevicePath)
-
-	if err := a.writeKeyFile(currentKeyPath, newKeyData); err != nil {
-		return fmt.Errorf("update current key file %s: %w", currentKeyPath, err)
-	}
-	log.Printf("updated current key file %s", currentKeyPath)
-
-	if err := a.Vault.WriteSecret(ctx, newKeyData, cfg.VaultMountPath, cfg.VaultSecretPath); err != nil {
-		return fmt.Errorf("write secret to vault %s/%s: %w", cfg.VaultMountPath, cfg.VaultSecretPath, err)
-	}
-	log.Printf("new passphrase wrote to Vault server on %s/%s", cfg.VaultMountPath, cfg.VaultSecretPath)
-
-	if _, err := a.Luks.KillKeySlot(cfg.DevicePath, vaultData.Slot, newKeyPath); err != nil {
-		return fmt.Errorf("remove old key slot %s: %w", vaultData.Slot, err)
-	}
-	log.Printf("old passphrase on %s device at keyslot %s removed", cfg.DevicePath, vaultData.Slot)
-
-	cleanupNewKey = false
-	if err := os.Remove(newKeyPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove temporary key file %s: %w", newKeyPath, err)
-	}
-
-	log.Printf("finished change passphrase")
-	return nil
-}
-
 func termHandle(sig os.Signal) error {
 	log.Println("terminating...")
 	stop <- struct{}{}
@@ -242,6 +242,12 @@ func termHandle(sig os.Signal) error {
 }
 
 func reloadHandler(sig os.Signal) error {
-	log.Println("configuration reload is not supported yet")
+	if reloadAgent == nil {
+		return fmt.Errorf("agent is not initialized")
+	}
+	if err := reloadAgent.runtime.Reload(); err != nil {
+		return err
+	}
+	reloadAgent.syncLUKSConfig(reloadAgent.runtime.Config())
 	return nil
 }
