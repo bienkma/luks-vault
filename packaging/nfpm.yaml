@@ -1,0 +1,58 @@
+name: luks-vault
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${VERSION}
+release: "1"
+section: utils
+priority: optional
+maintainer: bienkma <dev@null>
+description: |
+  LUKS passphrase rotation agent integrated with HashiCorp Vault.
+  Rotates LUKS key slots and stores passphrases in Vault KV v2.
+license: Apache-2.0
+homepage: https://github.com/bienkma/luks-vault
+vendor: bienkma
+
+depends:
+  - cryptsetup
+  - sudo
+  - systemd
+
+contents:
+  - src: dist/luks-vault
+    dst: /usr/local/bin/luks-vault
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+  - src: packaging/systemd/luks-vault.service
+    dst: /lib/systemd/system/luks-vault.service
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+  - src: packaging/sudoers/luks-vault
+    dst: /etc/sudoers.d/luks-vault
+    file_info:
+      mode: 0440
+      owner: root
+      group: root
+    type: config|noreplace
+  - src: packaging/config/config.yaml.example
+    dst: /etc/luks-vault/config.yaml.example
+    file_info:
+      mode: 0640
+      owner: root
+      group: root
+    type: config|noreplace
+
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  postremove: packaging/scripts/postremove.sh
+
+deb:
+  fields:
+    Bugs: https://github.com/bienkma/luks-vault/issues
+
+rpm:
+  group: System Environment/Daemons

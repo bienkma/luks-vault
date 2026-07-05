@@ -1,9 +1,10 @@
 package main
 
 import (
+	"context"
+
 	"github.com/bienkma/luks-vault/agent"
 )
-import "context"
 
 func main() {
 	ctx := context.Background()

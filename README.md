@@ -17,7 +17,7 @@ Luks-vault is a simple project to integrate [LUKS](https://access.redhat.com/doc
  docker run --rm \
             -v `pwd`:/go/src/github.com/bienkma/luks-vault \
             -w /go/src/github.com/bienkma/luks-vault \
-            golang:1.18 sh -c \
+            golang:1.26 sh -c \
             'GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -mod=mod -a -installsuffix cgo -o luks-vault main.go'
 ```
 
@@ -60,15 +60,14 @@ Type=forking
 User=root
 Group=root
 ExecStart=/usr/local/bin/luks-vault
-ExecStop=/bin/kill -3 $MAINPID
+ExecStop=/bin/kill -TERM $MAINPID
 PIDFile=/run/luks-vault.pid
 ExecStartPost=/bin/sleep 1
 WorkingDirectory=/usr/local/bin
-RestartSec=15
 KillMode=none
 PrivateTmp=false
 Restart=on-failure
-RestartSec=5
+RestartSec=15
 
 [Install]
 WantedBy=multi-user.target
