@@ -1,0 +1,8 @@
+# Allow the luks-vault service user to run LUKS rotation commands as root.
+Defaults:luks-vault !requiretty
+
+Cmnd_Alias LUKS_VAULT_CRYPTSETUP = /usr/sbin/cryptsetup -v -q luksAddKey *, \
+                                     /usr/sbin/cryptsetup -q -v luksKillSlot *, \
+                                     /usr/sbin/cryptsetup -q -v open --test-passphrase --type luks *
+
+luks-vault ALL=(root) NOPASSWD: LUKS_VAULT_CRYPTSETUP

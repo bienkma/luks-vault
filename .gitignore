@@ -1,4 +1,4 @@
 .env
 .idea/
-luks-vault
+/luks-vault
 dist/
