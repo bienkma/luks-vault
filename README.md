@@ -8,7 +8,10 @@ LUKS passphrase rotation agent for Linux, integrated with [HashiCorp Vault](http
 
 - Automatic LUKS passphrase rotation based on Vault TTL
 - Slot `0` / `1` swap strategy for safer key rollover
-- HashiCorp Vault KV v2 integration
+- HashiCorp Vault KV v2 integration with TLS/mTLS and AppRole or token auth
+- Rotation state file for crash recovery and step resume
+- Config reload via `SIGHUP` / `systemctl reload` without restart
+- Exponential backoff when rotation fails
 - Runs as non-root user (`luks-vault`) with limited `sudo` access to `cryptsetup`
 - Systemd service included
 - `.deb` and `.rpm` packages via `make package`
@@ -40,6 +43,8 @@ When TTL expires, the agent:
 5. Writes metadata to Vault
 6. Removes the old LUKS key slot
 7. Deletes the temporary key file
+
+Each successful step is persisted to `agent.state_file`. If the process crashes mid-rotation, the next run resumes from the last completed step instead of starting over.
 
 ## Requirements
 
@@ -81,15 +86,20 @@ The package installs:
 | `/lib/systemd/system/luks-vault.service` | Systemd unit |
 | `/etc/sudoers.d/luks-vault` | Limited sudo rules for `cryptsetup` |
 | `/etc/luks-vault/config.yaml.example` | Example configuration |
+| `/var/lib/luks-vault/` | Rotation state directory |
+| `/var/log/luks-vault/` | Log directory |
 
 After install:
 
 ```shell
-sudo cp /etc/luks-vault/config.yaml.example /etc/luks-vault/config.yaml
 sudo vi /etc/luks-vault/config.yaml
+sudo install -o luks-vault -g luks-vault -m 600 /path/to/approle-secret-id /etc/luks-vault/approle-secret-id
+sudo cp vault-ca.pem vault-client.pem vault-client-key.pem /etc/luks-vault/
 sudo systemctl enable --now luks-vault
 sudo systemctl status luks-vault
 ```
+
+On first install, the package creates `/etc/luks-vault/config.yaml` from the example if it does not exist yet.
 
 Release packages are also published as GitHub Actions artifacts and attached to Git tags (`v*`).
 
@@ -98,32 +108,96 @@ Release packages are also published as GitHub Actions artifacts and attached to 
 Configuration file: `/etc/luks-vault/config.yaml`
 
 ```yaml
-vault_address: "http://127.0.0.1:8200"
-vault_token: "change_me"
-vault_mount_path: "luks/hostname"
-vault_secret_path: "dev/sda"
-vault_module_luks: true
-cryptsetup_use_sudo: true
-device_path: "/dev/sda"
-folder_pass_phrase_path: "/etc/data-at-rest"
-pid_file_name: "/run/luks-vault/luks-vault.pid"
-log_file_name: "/var/log/luks-vault/agent.log"
+agent:
+  poll_interval: 10s
+  pid_file: /run/luks-vault/luks-vault.pid
+  log_file: /var/log/luks-vault/agent.log
+  state_file: /var/lib/luks-vault/rotation.state
+
+vault:
+  address: https://vault.example.com:8200
+  auth_method: approle
+  approle:
+    role_id: change-me-role-id
+    secret_id_file: /etc/luks-vault/approle-secret-id
+  kv2_mount: luks/hostname
+  secret_path: dev/sda
+  tls:
+    ca_cert: /etc/luks-vault/vault-ca.pem
+    client_cert: /etc/luks-vault/vault-client.pem
+    client_key: /etc/luks-vault/vault-client-key.pem
+    skip_verify: false
+
+luks:
+  enabled: true
+  device: /dev/sda
+  passphrase_dir: /etc/data-at-rest
+  cryptsetup_use_sudo: true
 ```
+
+### Agent
 
 | Key | Description |
 |-----|-------------|
-| `vault_address` | Vault API address |
-| `vault_token` | Vault token with read/write access to the secret |
-| `vault_mount_path` | KV v2 mount path |
-| `vault_secret_path` | Secret path under the mount |
-| `vault_module_luks` | Enable LUKS rotation logic |
-| `cryptsetup_use_sudo` | Run `cryptsetup` via `sudo -n` as non-root user |
-| `device_path` | LUKS block device, e.g. `/dev/sda` |
-| `folder_pass_phrase_path` | Directory for current and temporary key files |
-| `pid_file_name` | PID file path |
-| `log_file_name` | Log file path |
+| `agent.poll_interval` | How often the agent polls Vault |
+| `agent.pid_file` | PID file for legacy daemon mode |
+| `agent.log_file` | Log file path |
+| `agent.state_file` | Rotation state file for crash recovery |
 
-Example file: [`packaging/config/config.yaml.example`](packaging/config/config.yaml.example)
+### Vault
+
+| Key | Description |
+|-----|-------------|
+| `vault.address` | Vault API URL, use `https://` in production |
+| `vault.auth_method` | `token` or `approle` |
+| `vault.token` | Static token when `auth_method=token` |
+| `vault.approle.role_id` | AppRole role ID |
+| `vault.approle.secret_id` | AppRole secret ID |
+| `vault.approle.secret_id_file` | File containing AppRole secret ID |
+| `vault.kv2_mount` | KV v2 mount path |
+| `vault.secret_path` | Secret path under the mount |
+| `vault.tls.ca_cert` | CA certificate for Vault TLS |
+| `vault.tls.client_cert` | Client certificate for mTLS |
+| `vault.tls.client_key` | Client private key for mTLS |
+| `vault.tls.skip_verify` | Skip TLS verification, default `false` |
+
+### LUKS
+
+| Key | Description |
+|-----|-------------|
+| `luks.enabled` | Enable LUKS rotation |
+| `luks.device` | LUKS block device, e.g. `/dev/sda` |
+| `luks.passphrase_dir` | Directory for current and temporary key files |
+| `luks.cryptsetup_use_sudo` | Run `cryptsetup` via `sudo -n` |
+
+Example files:
+
+- [`packaging/config/config.yaml.example`](packaging/config/config.yaml.example) for production with AppRole + mTLS
+- [`config/config.yaml.example`](config/config.yaml.example) for local development with token auth
+
+> **Note:** Configuration uses nested YAML keys such as `vault.address`, `luks.device`, and `agent.log_file`. Older flat keys like `vault_address` or `device_path` are no longer supported.
+
+Reload config without restart:
+
+```shell
+sudo systemctl reload luks-vault
+# or
+sudo kill -HUP $(pidof luks-vault)
+```
+
+Minimal token-auth example for development:
+
+```yaml
+vault:
+  address: https://127.0.0.1:8200
+  auth_method: token
+  token: change_me
+  kv2_mount: luks/hostname
+  secret_path: dev/sda
+  tls:
+    ca_cert: /etc/luks-vault/vault-ca.pem
+    skip_verify: false
+```
 
 ## Vault secret format
 
@@ -190,7 +264,7 @@ Verify sudo access:
 sudo -u luks-vault sudo -n /usr/sbin/cryptsetup --version
 ```
 
-For legacy root-based deployment, set `cryptsetup_use_sudo: false` and run the binary without `--foreground`.
+For legacy root-based deployment, set `luks.cryptsetup_use_sudo: false` and run the binary without `--foreground`.
 
 ## Build from source
 
@@ -255,8 +329,15 @@ Legacy daemon mode:
 ```shell
 sudo systemctl start luks-vault
 sudo systemctl stop luks-vault
+sudo systemctl reload luks-vault
 sudo systemctl status luks-vault
 sudo tail -f /var/log/luks-vault/agent.log
+```
+
+When running with `--foreground`, logs are written to `agent.log_file` from the config (default: `/var/log/luks-vault/agent.log`). You can also inspect systemd status with:
+
+```shell
+sudo journalctl -u luks-vault -f
 ```
 
 ## Development
@@ -280,8 +361,8 @@ CI runs on push and pull requests:
 
 ```text
 .
-├── agent/              # daemon, rotation workflow, TTL logic
-├── config/             # configuration loader
+├── agent/              # daemon, rotation workflow, TTL, state, backoff
+├── config/             # configuration loader and examples
 ├── module/             # Vault and LUKS integrations
 ├── packaging/          # systemd, sudoers, nfpm, postinstall scripts
 ├── main.go

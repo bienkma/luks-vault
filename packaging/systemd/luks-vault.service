@@ -10,7 +10,9 @@ User=luks-vault
 Group=luks-vault
 RuntimeDirectory=luks-vault
 LogsDirectory=luks-vault
+StateDirectory=luks-vault
 ExecStart=/usr/local/bin/luks-vault --foreground
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=15
 
