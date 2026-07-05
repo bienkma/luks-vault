@@ -1,2 +1,4 @@
 .env
 .idea/
+luks-vault
+dist/
