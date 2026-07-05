@@ -1,0 +1,10 @@
+vault_address: "http://127.0.0.1:8200"
+vault_token: "change_me"
+vault_mount_path: "luks/hostname"
+vault_secret_path: "dev/sda"
+vault_module_luks: true
+cryptsetup_use_sudo: true
+device_path: "/dev/sda"
+folder_pass_phrase_path: "/etc/data-at-rest"
+pid_file_name: "/run/luks-vault/luks-vault.pid"
+log_file_name: "/var/log/luks-vault/agent.log"

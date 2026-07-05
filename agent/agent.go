@@ -4,26 +4,30 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
+	"os"
+	ossignal "os/signal"
+	"syscall"
+	"time"
+
 	"github.com/bienkma/luks-vault/config"
 	"github.com/bienkma/luks-vault/module"
 	vault "github.com/hashicorp/vault/api"
 	"github.com/sethvargo/go-password/password"
 	"github.com/sevlyar/go-daemon"
-	"log"
-	"os"
-	"syscall"
-	"time"
 )
+
+const pollInterval = 10 * time.Second
 
 var (
 	signal = flag.String("s", "", `Send signal to the daemon:
 	quit - graceful shutdown
 	stop - fast shutdown
 	reload - reloading the configuration file`)
+	foreground = flag.Bool("foreground", false, "Run in the foreground without daemon fork (for systemd)")
 	stop           = make(chan struct{})
 	done           = make(chan struct{})
 	currentKeyName = "key"
-	oldKeyName     = "oldKey"
 	newKeyName     = "newKey"
 )
 
@@ -37,17 +41,22 @@ func New() *Instances {
 }
 
 func (a *Instances) Start(ctx context.Context) {
-	// Load configuration agent
 	cfg := config.New()
 
-	// Daemon load configuration
 	flag.Parse()
+	a.Luks.UseSudo = cfg.CryptsetupUseSudo
+
+	if *foreground {
+		a.runForeground(ctx, cfg)
+		return
+	}
+
 	daemon.AddCommand(daemon.StringFlag(signal, "quit"), syscall.SIGQUIT, termHandle)
 	daemon.AddCommand(daemon.StringFlag(signal, "reload"), syscall.SIGHUP, reloadHandler)
 
 	cntxt := &daemon.Context{
 		PidFileName: cfg.PidFileName,
-		PidFilePerm: 0644,
+		PidFilePerm: 0600,
 		LogFileName: cfg.LogFileName,
 		LogFilePerm: 0640,
 		Umask:       027,
@@ -82,106 +91,145 @@ func (a *Instances) Start(ctx context.Context) {
 	log.Println("luks-vault daemon terminated")
 }
 
+func (a *Instances) runForeground(ctx context.Context, cfg *config.Configuration) {
+	log.Println("luks-vault started in foreground mode")
+	if cfg.CryptsetupUseSudo {
+		log.Println("cryptsetup will run via sudo")
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	ossignal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT)
+
+	go a.worker(ctx, cfg)
+
+	sig := <-sigCh
+	log.Printf("received signal %v, shutting down", sig)
+	stop <- struct{}{}
+	<-done
+	log.Println("luks-vault terminated")
+}
+
 func (a *Instances) worker(ctx context.Context, cfg *config.Configuration) {
-	// vault client init
-	config := vault.DefaultConfig()
+	defer func() {
+		done <- struct{}{}
+	}()
 
-	config.Address = cfg.VaultAddress
+	vaultConfig := vault.DefaultConfig()
+	vaultConfig.Address = cfg.VaultAddress
 
-	client, err := vault.NewClient(config)
+	client, err := vault.NewClient(vaultConfig)
 	if err != nil {
-		log.Fatalf("unable to initialize Vault client: %v\n", err)
+		log.Printf("unable to initialize Vault client: %v", err)
+		return
 	}
 	a.Vault.VaultClient = client
-
-	// Authenticate
 	a.Vault.VaultClient.SetToken(cfg.VaultToken)
-LOOP:
+
 	for {
-		time.Sleep(10 * time.Second) // this is work to be done by worker.
-		// step 1: Get information from vault
-		vaultData, secErr := a.Vault.GetSecret(ctx, cfg.VaultMountPath, cfg.VaultSecretPath)
-		if secErr != nil {
-			log.Fatalf("step 1: unable to get vault %s/%s \n", cfg.VaultMountPath, cfg.VaultSecretPath)
-		}
-		now := time.Now()
-		created, _ := time.Parse(time.RFC3339, vaultData.Created)
-		ttl, _ := time.ParseDuration(vaultData.TTL)
-
-		// step 2: check TTL
-		if created.Add(ttl).Before(now) {
-			var (
-				//oldKeyPath     = fmt.Sprintf("%s/%s", cfg.FolderPassPhrasePath, oldKeyName)
-				newKeyPath     = fmt.Sprintf("%s/%s", cfg.FolderPassPhrasePath, newKeyName)
-				currentKeyPath = fmt.Sprintf("%s/%s", cfg.FolderPassPhrasePath, currentKeyName)
-			)
-
-			oldKeyData := module.VaultData{
-				Key:     vaultData.Key,
-				Slot:    vaultData.Slot,
-				TTL:     vaultData.TTL,
-				Created: vaultData.Created,
-			}
-
-			// step 3: create new password
-			pwd, _ := password.Generate(64, 10, 10, false, false)
-			newKeyData := module.VaultData{
-				Key:     pwd,
-				Slot:    vaultData.Slot,
-				TTL:     vaultData.TTL,
-				Created: vaultData.Created,
-			}
-
-			// step 4: write new file key
-			if oldKeyData.Slot == "0" {
-				newKeyData.Slot = "1"
-			} else {
-				newKeyData.Slot = "0"
-			}
-			if err := a.writeKeyFile(newKeyPath, newKeyData); err != nil {
-				log.Printf("step 4: unable to write %s/newKeyData\n", cfg.FolderPassPhrasePath)
-				log.Fatalln(err)
-			}
-			// step 5: update newKey to LUKS
-			log.Printf("begin add new passphrase in %s device at keyslot %s\n", cfg.DevicePath, newKeyData.Slot)
-			_, errAdd := a.Luks.AddPasswdLUKS(cfg.DevicePath, currentKeyPath, newKeyPath, newKeyData.Slot)
-			if errAdd != nil {
-				log.Fatalf("step 5: we can not add luks to device %s with newkey %s at keyslot %s", cfg.DevicePath, newKeyPath, newKeyData.Slot)
-			}
-			log.Printf("new passphrase has added in %s device at keyslot %s \n", cfg.DevicePath, newKeyData.Slot)
-
-			// step 6: verify passPhrase with LUKS device
-			_, errVerify := a.Luks.VerifyPasswdLUKS(cfg.DevicePath, newKeyPath)
-			if errVerify != nil {
-				log.Fatalf("step 6: we can not change passPharse on the device with %s key\n", newKeyPath)
-			}
-			log.Printf("verify new passphrase on keyslot %s in %s device\n", newKeyData.Slot, cfg.DevicePath)
-			// step 7: write passPhrase to Vault
-			if err := a.Vault.WriteSecret(ctx, newKeyData, cfg.VaultMountPath, cfg.VaultSecretPath); err != nil {
-				log.Fatalf("step 7: we can not write data to vault %v", err)
-			}
-			log.Printf("new passphrase wrote to Vault server on %s/%s", cfg.VaultMountPath, cfg.VaultSecretPath)
-			// step 8: remove old key slot
-			_, err := a.Luks.KillKeySlot(cfg.DevicePath, oldKeyData.Slot, newKeyPath)
-			if err != nil {
-				log.Fatalf("step 8: we can not remove old key slot %s", oldKeyData.Slot)
-			}
-			log.Printf("old passpharse on %s device at keyslot %s removed", cfg.DevicePath, oldKeyData.Slot)
-			// step 9: update current key
-			errW := a.writeKeyFile(currentKeyPath, newKeyData)
-			if errW != nil {
-				log.Fatalf("step 9: can not update newKey to current key")
-			}
-			log.Printf("finished change passphrase!...")
+		if stopped := a.waitOrStop(ctx, pollInterval); stopped {
+			return
 		}
 
-		select {
-		case <-stop:
-			break LOOP
-		default:
+		vaultData, err := a.Vault.GetSecret(ctx, cfg.VaultMountPath, cfg.VaultSecretPath)
+		if err != nil {
+			log.Printf("unable to get vault secret %s/%s: %v", cfg.VaultMountPath, cfg.VaultSecretPath, err)
+			continue
+		}
+
+		expired, err := isTTLExpired(vaultData.Created, vaultData.TTL, time.Now())
+		if err != nil {
+			log.Printf("invalid TTL metadata in vault secret: %v", err)
+			continue
+		}
+		if !expired {
+			continue
+		}
+
+		if err := a.rotatePassphrase(ctx, cfg, vaultData); err != nil {
+			log.Printf("passphrase rotation failed: %v", err)
 		}
 	}
-	done <- struct{}{}
+}
+
+func (a *Instances) waitOrStop(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-stop:
+		return true
+	case <-ctx.Done():
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func (a *Instances) rotatePassphrase(ctx context.Context, cfg *config.Configuration, vaultData *module.VaultData) error {
+	newKeyPath := fmt.Sprintf("%s/%s", cfg.FolderPassPhrasePath, newKeyName)
+	currentKeyPath := fmt.Sprintf("%s/%s", cfg.FolderPassPhrasePath, currentKeyName)
+	cleanupNewKey := true
+	defer func() {
+		if cleanupNewKey {
+			if err := os.Remove(newKeyPath); err != nil && !os.IsNotExist(err) {
+				log.Printf("warning: failed to remove temporary key file %s: %v", newKeyPath, err)
+			}
+		}
+	}()
+
+	newSlot, err := alternateSlot(vaultData.Slot)
+	if err != nil {
+		return err
+	}
+
+	pwd, err := password.Generate(64, 10, 10, false, false)
+	if err != nil {
+		return fmt.Errorf("generate new passphrase: %w", err)
+	}
+
+	newKeyData := module.VaultData{
+		Key:  pwd,
+		Slot: newSlot,
+		TTL:  vaultData.TTL,
+	}
+
+	if err := a.writeKeyFile(newKeyPath, newKeyData); err != nil {
+		return fmt.Errorf("write temporary key file: %w", err)
+	}
+
+	log.Printf("begin add new passphrase in %s device at keyslot %s", cfg.DevicePath, newKeyData.Slot)
+	if _, err := a.Luks.AddPasswdLUKS(cfg.DevicePath, currentKeyPath, newKeyPath, newKeyData.Slot); err != nil {
+		return fmt.Errorf("add LUKS key on slot %s: %w", newKeyData.Slot, err)
+	}
+	log.Printf("new passphrase added in %s device at keyslot %s", cfg.DevicePath, newKeyData.Slot)
+
+	if _, err := a.Luks.VerifyPasswdLUKS(cfg.DevicePath, newKeyPath); err != nil {
+		return fmt.Errorf("verify new passphrase with %s: %w", newKeyPath, err)
+	}
+	log.Printf("verified new passphrase on keyslot %s in %s device", newKeyData.Slot, cfg.DevicePath)
+
+	if err := a.writeKeyFile(currentKeyPath, newKeyData); err != nil {
+		return fmt.Errorf("update current key file %s: %w", currentKeyPath, err)
+	}
+	log.Printf("updated current key file %s", currentKeyPath)
+
+	if err := a.Vault.WriteSecret(ctx, newKeyData, cfg.VaultMountPath, cfg.VaultSecretPath); err != nil {
+		return fmt.Errorf("write secret to vault %s/%s: %w", cfg.VaultMountPath, cfg.VaultSecretPath, err)
+	}
+	log.Printf("new passphrase wrote to Vault server on %s/%s", cfg.VaultMountPath, cfg.VaultSecretPath)
+
+	if _, err := a.Luks.KillKeySlot(cfg.DevicePath, vaultData.Slot, newKeyPath); err != nil {
+		return fmt.Errorf("remove old key slot %s: %w", vaultData.Slot, err)
+	}
+	log.Printf("old passphrase on %s device at keyslot %s removed", cfg.DevicePath, vaultData.Slot)
+
+	cleanupNewKey = false
+	if err := os.Remove(newKeyPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove temporary key file %s: %w", newKeyPath, err)
+	}
+
+	log.Printf("finished change passphrase")
+	return nil
 }
 
 func termHandle(sig os.Signal) error {
@@ -194,6 +242,6 @@ func termHandle(sig os.Signal) error {
 }
 
 func reloadHandler(sig os.Signal) error {
-	log.Println("configuration reloaded")
+	log.Println("configuration reload is not supported yet")
 	return nil
 }

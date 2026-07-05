@@ -1,0 +1,19 @@
+[Unit]
+Description=LUKS Vault agent
+Documentation=https://github.com/bienkma/luks-vault
+After=network-online.target auditd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=luks-vault
+Group=luks-vault
+RuntimeDirectory=luks-vault
+LogsDirectory=luks-vault
+ExecStart=/usr/local/bin/luks-vault --foreground
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
+Alias=luks-vault.service
